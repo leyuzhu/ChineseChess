@@ -21,20 +21,23 @@ import (
 
 //Game 象棋窗口
 type Game struct {
-	sqSelected     int                   // 选中的格子
-	mvLast         int                   // 上一步棋
-	bFlipped       bool                  //是否翻转棋盘
-	bGameOver      bool                  //是否游戏结束
-	showValue      string                //显示内容
-	images         map[int]*ebiten.Image //图片资源
-	audios         map[int]*audio.Player //音效
-	audioContext   *audio.Context        //音效器
-	singlePosition *PositionStruct       //棋局单例
+	bFirstStep       bool                  // 是否第一步
+	sqSelected       int                   // 选中的格子
+	mvLast           int                   // 上一步棋
+	bFlipped         bool                  //是否翻转棋盘
+	bGameOver        bool                  //是否游戏结束
+	showValue        string                //显示内容
+	images           map[int]*ebiten.Image //图片资源
+	audios           map[int]*audio.Player //音效
+	audioContext     *audio.Context        //音效器
+	singlePosition   *PositionStruct       //棋局单例
+	aiSinglePosition PositionStruct        //棋局单例
 }
 
 //NewGame 创建象棋程序
 func NewGame() bool {
 	game := &Game{
+		bFirstStep:     true,
 		bFlipped:       true,
 		images:         make(map[int]*ebiten.Image),
 		audios:         make(map[int]*audio.Player),
@@ -57,11 +60,16 @@ func NewGame() bool {
 		return false
 	}
 
+	//棋子
 	game.singlePosition.startup()
+	game.singlePosition.bFlipped = game.bFlipped
+	if game.singlePosition.bFlipped {
+		game.singlePosition.flipBoard()
+
+	}
 
 	ebiten.SetWindowSize(BoardWidth, BoardHeight)
 	ebiten.SetWindowTitle("中国象棋")
-	fmt.Printf("ebiten.GamepadButton0: %v\n", ebiten.GamepadButton0)
 	if err := ebiten.RunGame(game); err != nil {
 		log.Fatal(err)
 		return false
@@ -72,6 +80,11 @@ func NewGame() bool {
 
 //Update 更新状态，1秒60帧
 func (g *Game) Update(screen *ebiten.Image) error {
+	if g.bFlipped && g.bFirstStep {
+		g.aiMove(screen)
+		g.bFirstStep = false
+	}
+
 	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
 		x, y := ebiten.CursorPosition()
 		x = Left + (x-BoardEdge)/SquareSize
@@ -148,18 +161,12 @@ func (g *Game) drawBoard(screen *ebiten.Image) {
 		op.GeoM.Translate(0, 0)
 		screen.DrawImage(v, op)
 	}
-
 	//棋子
 	for x := Left; x <= Right; x++ {
 		for y := Top; y <= Bottom; y++ {
 			xPos, yPos := 0, 0
-			if g.bFlipped {
-				xPos = BoardEdge + (xFlip(x)-Left)*SquareSize
-				yPos = BoardEdge + (yFlip(y)-Top)*SquareSize
-			} else {
-				xPos = BoardEdge + (x-Left)*SquareSize
-				yPos = BoardEdge + (y-Top)*SquareSize
-			}
+			xPos = BoardEdge + (x-Left)*SquareSize
+			yPos = BoardEdge + (y-Top)*SquareSize
 			sq := squareXY(x, y)
 			pc := g.singlePosition.ucpcSquares[sq]
 			if pc != 0 {
@@ -172,34 +179,19 @@ func (g *Game) drawBoard(screen *ebiten.Image) {
 	}
 }
 
+//clickSquare 点击格子处理
 func (g *Game) clickSquare(screen *ebiten.Image, sq int) {
 	pc := 0
-	if g.bFlipped {
-		pc = g.singlePosition.ucpcSquares[squareFlip(sq)]
-	} else {
-		pc = g.singlePosition.ucpcSquares[sq]
-	}
-	fmt.Printf("pc= %d\n", pc)
-	fmt.Printf("g.singlePosition.sdPlayer= %d\n", g.singlePosition.sdPlayer)
-	fmt.Printf("sideTag= %d\n", sideTag(g.singlePosition.sdPlayer))
+	pc = g.singlePosition.ucpcSquares[sq]
 
 	if (pc & sideTag(g.singlePosition.sdPlayer)) != 0 {
-		//如果点击自己的棋子，那么直接选中
-		if g.bFlipped {
-			g.sqSelected = squareFlip(sq)
-		} else {
-			g.sqSelected = sq
-		}
+		g.sqSelected = sq
 		g.playAudio(MusicSelect)
 	} else if g.sqSelected != 0 && !g.bGameOver {
 		//如果点击的不是自己的棋子，但有棋子选中了(一定是自己的棋子)，那么走这个棋子
-		dst := sq
-		if g.bFlipped {
-			dst = squareFlip(sq)
-		}
-		mv := move(g.sqSelected, dst)
+		mv := move(g.sqSelected, sq)
 		if g.singlePosition.legalMove(mv) {
-			if g.singlePosition.makeMove(mv) {
+			if ok, pc := g.singlePosition.makeMove(mv); ok {
 				g.mvLast = mv
 				g.sqSelected = 0
 				if g.singlePosition.isMate() {
@@ -218,12 +210,43 @@ func (g *Game) clickSquare(screen *ebiten.Image, sq int) {
 							g.playAudio(MusicPut)
 						}
 					}
+					go g.aiMove(screen)
 				}
 			} else {
 				g.playAudio(MusicJiang) // 播放被将军的声音
 			}
 		}
 		//如果根本就不符合走法(例如马不走日字)，那么不做任何处理
+	}
+}
+
+//aiMove AI移动
+func (g *Game) aiMove(screen *ebiten.Image) {
+	// Sleep 2 seconds
+	//fmt.Println("aiMove")
+	//time.Sleep(2 * time.Second)
+	//AI走一步棋
+	g.aiSinglePosition = *(g.singlePosition)
+	g.aiSinglePosition.searchMain()
+	_, pcCaptured := g.singlePosition.makeMove(g.aiSinglePosition.search.mvResult)
+	//把AI走的棋标记出来
+	g.mvLast = g.singlePosition.search.mvResult
+	if g.singlePosition.isMate() {
+		//如果分出胜负，那么播放胜负的声音
+		g.playAudio(MusicGameWin)
+		g.showValue = "Your Lose!"
+		g.bGameOver = true
+	} else {
+		//如果没有分出胜负，那么播放将军、吃子或一般走子的声音
+		if g.singlePosition.checked() {
+			g.playAudio(MusicJiang)
+		} else {
+			if pcCaptured != 0 {
+				g.playAudio(MusicEat)
+			} else {
+				g.playAudio(MusicPut)
+			}
+		}
 	}
 }
 
